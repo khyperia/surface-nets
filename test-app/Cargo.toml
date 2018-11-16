@@ -1,0 +1,12 @@
+[package]
+name = "test-app"
+version = "0.1.0"
+authors = ["khyperia <khyperia@live.com>"]
+
+[dependencies]
+surface-nets = { path = ".." }
+noise = ""
+gfx = ""
+gfx_window_glutin = ""
+glutin = ""
+cgmath = ""
