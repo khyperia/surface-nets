@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::time::Instant;
 
 // Positive is "air"
 // Negative is "solid"
 
 type SDF = Fn(usize, usize, usize) -> f32;
 
+// Implements memoization (if memoize is true, copy the function into a vec and
+// use that instead of the function)
 pub fn surface_net(
     resolution: usize,
     signed_distance_field: &SDF,
@@ -24,16 +25,19 @@ pub fn surface_net(
     }
 }
 
+// Main algorithm driver.
 fn surface_net_impl(resolution: usize, grid_values: &SDF) -> (Vec<(f32, f32, f32)>, Vec<usize>) {
-    let start = Instant::now();
     let mut vertex_positions = Vec::new();
     let mut grid_to_index = HashMap::new();
+    // Find all vertex positions. Addtionally, create a hashmap from grid
+    // position to index (i.e. OpenGL vertex index).
     for coords in coords(resolution) {
         if let Some(center) = find_center(grid_values, coords) {
             grid_to_index.insert(coords, vertex_positions.len());
             vertex_positions.push(center);
         }
     }
+    // Find all triangles, in the form of [index, index, index] triples.
     let mut indicies = Vec::new();
     make_all_triangles(
         grid_values,
@@ -42,19 +46,17 @@ fn surface_net_impl(resolution: usize, grid_values: &SDF) -> (Vec<(f32, f32, f32
         &vertex_positions,
         &mut indicies,
     );
-    let end = Instant::now();
-    let duration = end.duration_since(start);
-    let time = duration.as_secs() as f64 + f64::from(duration.subsec_nanos()) / 1_000_000_000.0;
-    println!("{:?}", time);
     (vertex_positions, indicies)
 }
 
+// Iterator over all integer points in a 3d cube from 0 to size
 fn coords(size: usize) -> impl Iterator<Item = (usize, usize, usize)> {
     (0..size)
         .flat_map(move |x| (0..size).map(move |y| (x, y)))
         .flat_map(move |(x, y)| (0..size).map(move |z| (x, y, z)))
 }
 
+// List of all edges in a cube.
 const OFFSETS: [((usize, usize, usize), (usize, usize, usize)); 12] = [
     ((0, 0, 0), (0, 0, 1)),
     ((0, 0, 0), (0, 1, 0)),
@@ -70,6 +72,16 @@ const OFFSETS: [((usize, usize, usize), (usize, usize, usize)); 12] = [
     ((1, 1, 0), (1, 1, 1)),
 ];
 
+// Find the vertex position for this grid: it will be somewhere within the cube
+// with coordinates [0,1].
+// How? First, for each edge in the cube, find if that edge crosses the SDF
+// boundary - i.e. one point is positive, one point is negative.
+// Second, calculate the "weighted midpoint" between these points (see
+// find_edge).
+// Third, take the average of all these points for all edges (for edges that
+// have crossings).
+// There are more complicated and better algorithms than this, but this is
+// simple and easy to implement.
 fn find_center(grid_values: &SDF, coord: (usize, usize, usize)) -> Option<(f32, f32, f32)> {
     let edges = OFFSETS
         .iter()
@@ -91,6 +103,10 @@ fn find_center(grid_values: &SDF, coord: (usize, usize, usize)) -> Option<(f32, 
     }
 }
 
+// Given two points, A and B, find the point between them where the SDF is zero.
+// (This might not exist).
+// A and B are specified via A=coord+offset1 and B=coord+offset2, because code
+// is weird.
 fn find_edge(
     grid_values: &SDF,
     coord: (usize, usize, usize),
@@ -119,6 +135,12 @@ fn find_edge(
     Some(point)
 }
 
+// For every edge that crosses the boundary, make a quad between the
+// "centers" of the four cubes touching that boundary. (Well, really, two
+// triangles) The "centers" are actually the vertex positions, found earlier.
+// (Also, make sure the triangles are facing the right way)
+// There's some hellish off-by-one conditions and whatnot that make this code
+// really gross.
 fn make_all_triangles(
     grid_values: &SDF,
     resolution: usize,
@@ -128,6 +150,7 @@ fn make_all_triangles(
 ) {
     for coord in coords(resolution) {
         // TODO: Cache grid_values(coord), it's called three times here.
+        // Do edges parallel with the X axis
         if coord.1 != 0 && coord.2 != 0 {
             make_triangle(
                 grid_values,
@@ -140,6 +163,7 @@ fn make_all_triangles(
                 (0, 0, 1),
             );
         }
+        // Do edges parallel with the Y axis
         if coord.0 != 0 && coord.2 != 0 {
             make_triangle(
                 grid_values,
@@ -152,6 +176,7 @@ fn make_all_triangles(
                 (1, 0, 0),
             );
         }
+        // Do edges parallel with the Z axis
         if coord.0 != 0 && coord.1 != 0 {
             make_triangle(
                 grid_values,
@@ -182,6 +207,7 @@ fn make_triangle(
     if let FaceResult::NoFace = face_result {
         return;
     }
+    // The triangle points, viewed face-front, look like this:
     // v1 v3
     // v2 v4
     let v1 = *grid_to_index.get(&(coord.0, coord.1, coord.2)).unwrap();
@@ -208,6 +234,7 @@ fn make_triangle(
     }
     let d14 = dist(p1, p4);
     let d23 = dist(p2, p3);
+    // Split the quad along the shorter axis, rather than the longer one.
     if d14 < d23 {
         match face_result {
             FaceResult::NoFace => (),
@@ -261,6 +288,7 @@ enum FaceResult {
     FaceNegative,
 }
 
+// Determine if the sign of the SDF flips between coord and (coord+offset)
 fn is_face(
     grid_values: &SDF,
     coord: (usize, usize, usize),
