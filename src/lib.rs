@@ -1,29 +1,58 @@
-mod array;
-
-use array::Array;
+use std::collections::HashMap;
+use std::time::Instant;
 
 // Positive is "air"
 // Negative is "solid"
 
-pub fn surface_net<F: Fn((usize, usize, usize)) -> f32>(
+type SDF = Fn(usize, usize, usize) -> f32;
+
+pub fn surface_net(
     resolution: usize,
-    func: F,
+    signed_distance_field: &SDF,
+    memoize: bool,
 ) -> (Vec<(f32, f32, f32)>, Vec<usize>) {
-    let grid_values = Array::create_from(resolution + 1, func);
+    if memoize {
+        let axis_length = resolution + 1;
+        let arr = coords(axis_length)
+            .map(|(x, y, z)| signed_distance_field(x, y, z))
+            .collect::<Vec<_>>();
+        surface_net_impl(resolution, &move |x, y, z| {
+            arr[z * axis_length * axis_length + y * axis_length + x]
+        })
+    } else {
+        surface_net_impl(resolution, signed_distance_field)
+    }
+}
+
+fn surface_net_impl(resolution: usize, grid_values: &SDF) -> (Vec<(f32, f32, f32)>, Vec<usize>) {
+    let start = Instant::now();
     let mut vertex_positions = Vec::new();
-    let grid_to_index = Array::create_from(resolution, |coords| {
-        match find_center(&grid_values, coords) {
-            Some(x) => {
-                let index = vertex_positions.len();
-                vertex_positions.push(x);
-                index
-            }
-            None => usize::max_value(),
+    let mut grid_to_index = HashMap::new();
+    for coords in coords(resolution) {
+        if let Some(center) = find_center(grid_values, coords) {
+            grid_to_index.insert(coords, vertex_positions.len());
+            vertex_positions.push(center);
         }
-    });
+    }
     let mut indicies = Vec::new();
-    make_all_triangles(&grid_values, resolution, &grid_to_index, &mut indicies);
+    make_all_triangles(
+        grid_values,
+        resolution,
+        &grid_to_index,
+        &vertex_positions,
+        &mut indicies,
+    );
+    let end = Instant::now();
+    let duration = end.duration_since(start);
+    let time = duration.as_secs() as f64 + f64::from(duration.subsec_nanos()) / 1_000_000_000.0;
+    println!("{:?}", time);
     (vertex_positions, indicies)
+}
+
+fn coords(size: usize) -> impl Iterator<Item = (usize, usize, usize)> {
+    (0..size)
+        .flat_map(move |x| (0..size).map(move |y| (x, y)))
+        .flat_map(move |(x, y)| (0..size).map(move |z| (x, y, z)))
 }
 
 const OFFSETS: [((usize, usize, usize), (usize, usize, usize)); 12] = [
@@ -41,10 +70,7 @@ const OFFSETS: [((usize, usize, usize), (usize, usize, usize)); 12] = [
     ((1, 1, 0), (1, 1, 1)),
 ];
 
-fn find_center(
-    grid_values: &Array<Vec<f32>>,
-    coord: (usize, usize, usize),
-) -> Option<(f32, f32, f32)> {
+fn find_center(grid_values: &SDF, coord: (usize, usize, usize)) -> Option<(f32, f32, f32)> {
     let edges = OFFSETS
         .iter()
         .filter_map(|&(offset1, offset2)| find_edge(grid_values, coord, offset1, offset2));
@@ -66,21 +92,21 @@ fn find_center(
 }
 
 fn find_edge(
-    grid_values: &Array<Vec<f32>>,
+    grid_values: &SDF,
     coord: (usize, usize, usize),
     offset1: (usize, usize, usize),
     offset2: (usize, usize, usize),
 ) -> Option<(f32, f32, f32)> {
-    let value1 = grid_values[(
+    let value1 = grid_values(
         offset1.0 + coord.0,
         offset1.1 + coord.1,
         offset1.2 + coord.2,
-    )];
-    let value2 = grid_values[(
+    );
+    let value2 = grid_values(
         offset2.0 + coord.0,
         offset2.1 + coord.1,
         offset2.2 + coord.2,
-    )];
+    );
     if (value1 < 0.0) == (value2 < 0.0) {
         return None;
     }
@@ -94,99 +120,137 @@ fn find_edge(
 }
 
 fn make_all_triangles(
-    grid_values: &Array<Vec<f32>>,
+    grid_values: &SDF,
     resolution: usize,
-    grid_to_index: &Array<Vec<usize>>,
+    grid_to_index: &HashMap<(usize, usize, usize), usize>,
+    vertex_positions: &Vec<(f32, f32, f32)>,
     indicies: &mut Vec<usize>,
 ) {
-    for x in 0..resolution {
-        for y in 0..resolution {
-            for z in 0..resolution {
-                if y != 0 && z != 0 {
-                    make_triangles(
-                        grid_values,
-                        grid_to_index,
-                        indicies,
-                        (x, y, z),
-                        (1, 0, 0),
-                        (0, 1, 0),
-                        (0, 0, 1),
-                    );
-                }
-                if x != 0 && z != 0 {
-                    make_triangles(
-                        grid_values,
-                        grid_to_index,
-                        indicies,
-                        (x, y, z),
-                        (0, 1, 0),
-                        (0, 0, 1),
-                        (1, 0, 0),
-                    );
-                }
-                if x != 0 && y != 0 {
-                    make_triangles(
-                        grid_values,
-                        grid_to_index,
-                        indicies,
-                        (x, y, z),
-                        (0, 0, 1),
-                        (1, 0, 0),
-                        (0, 1, 0),
-                    );
-                }
-            }
+    for coord in coords(resolution) {
+        // TODO: Cache grid_values(coord), it's called three times here.
+        if coord.1 != 0 && coord.2 != 0 {
+            make_triangle(
+                grid_values,
+                grid_to_index,
+                vertex_positions,
+                indicies,
+                coord,
+                (1, 0, 0),
+                (0, 1, 0),
+                (0, 0, 1),
+            );
+        }
+        if coord.0 != 0 && coord.2 != 0 {
+            make_triangle(
+                grid_values,
+                grid_to_index,
+                vertex_positions,
+                indicies,
+                coord,
+                (0, 1, 0),
+                (0, 0, 1),
+                (1, 0, 0),
+            );
+        }
+        if coord.0 != 0 && coord.1 != 0 {
+            make_triangle(
+                grid_values,
+                grid_to_index,
+                vertex_positions,
+                indicies,
+                coord,
+                (0, 0, 1),
+                (1, 0, 0),
+                (0, 1, 0),
+            );
         }
     }
 }
 
-fn make_triangles(
-    grid_values: &Array<Vec<f32>>,
-    grid_to_index: &Array<Vec<usize>>,
+#[allow(too_many_arguments)]
+fn make_triangle(
+    grid_values: &SDF,
+    grid_to_index: &HashMap<(usize, usize, usize), usize>,
+    vertex_positions: &Vec<(f32, f32, f32)>,
     indicies: &mut Vec<usize>,
     coord: (usize, usize, usize),
     offset: (usize, usize, usize),
-    other_axis1: (usize, usize, usize),
-    other_axis2: (usize, usize, usize),
+    axis1: (usize, usize, usize),
+    axis2: (usize, usize, usize),
 ) {
-    let v1 = grid_to_index[(coord.0, coord.1, coord.2)];
-    let v2 = grid_to_index[(
-        coord.0 - other_axis1.0,
-        coord.1 - other_axis1.1,
-        coord.2 - other_axis1.2,
-    )];
-    let v3 = grid_to_index[(
-        coord.0 - other_axis2.0,
-        coord.1 - other_axis2.1,
-        coord.2 - other_axis2.2,
-    )];
-    let v4 = grid_to_index[(
-        coord.0 - other_axis1.0 - other_axis2.0,
-        coord.1 - other_axis1.1 - other_axis2.1,
-        coord.2 - other_axis1.2 - other_axis2.2,
-    )];
-    if v1 == usize::max_value() || v2 == usize::max_value() || v3 == usize::max_value() {
+    let face_result = is_face(grid_values, coord, offset);
+    if let FaceResult::NoFace = face_result {
         return;
     }
-    match is_face(grid_values, coord, offset) {
-        FaceResult::NoFace => (),
-        FaceResult::FacePositive => {
-            indicies.push(v1);
-            indicies.push(v2);
-            indicies.push(v4);
+    // v1 v3
+    // v2 v4
+    let v1 = *grid_to_index.get(&(coord.0, coord.1, coord.2)).unwrap();
+    let v2 = *grid_to_index
+        .get(&(coord.0 - axis1.0, coord.1 - axis1.1, coord.2 - axis1.2))
+        .unwrap();
+    let v3 = *grid_to_index
+        .get(&(coord.0 - axis2.0, coord.1 - axis2.1, coord.2 - axis2.2))
+        .unwrap();
+    let v4 = *grid_to_index
+        .get(&(
+            coord.0 - axis1.0 - axis2.0,
+            coord.1 - axis1.1 - axis2.1,
+            coord.2 - axis1.2 - axis2.2,
+        )).unwrap();
+    // optional addition to algorithm: split quad to triangles in a certain way
+    let p1 = vertex_positions[v1];
+    let p2 = vertex_positions[v2];
+    let p3 = vertex_positions[v3];
+    let p4 = vertex_positions[v4];
+    fn dist(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
+        let d = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+        d.0 * d.0 + d.1 * d.1 + d.2 * d.2
+    }
+    let d14 = dist(p1, p4);
+    let d23 = dist(p2, p3);
+    if d14 < d23 {
+        match face_result {
+            FaceResult::NoFace => (),
+            FaceResult::FacePositive => {
+                indicies.push(v1);
+                indicies.push(v2);
+                indicies.push(v4);
 
-            indicies.push(v1);
-            indicies.push(v4);
-            indicies.push(v3);
+                indicies.push(v1);
+                indicies.push(v4);
+                indicies.push(v3);
+            }
+            FaceResult::FaceNegative => {
+                indicies.push(v1);
+                indicies.push(v4);
+                indicies.push(v2);
+
+                indicies.push(v1);
+                indicies.push(v3);
+                indicies.push(v4);
+            }
         }
-        FaceResult::FaceNegative => {
-            indicies.push(v1);
-            indicies.push(v4);
-            indicies.push(v2);
+    } else {
+        match face_result {
+            FaceResult::NoFace => (),
+            FaceResult::FacePositive => {
+                indicies.push(v2);
+                indicies.push(v4);
+                indicies.push(v3);
 
-            indicies.push(v1);
-            indicies.push(v3);
-            indicies.push(v4);
+                indicies.push(v2);
+                indicies.push(v3);
+                indicies.push(v1);
+            }
+            FaceResult::FaceNegative => {
+                indicies.push(v2);
+                indicies.push(v3);
+                indicies.push(v4);
+
+                indicies.push(v2);
+                indicies.push(v1);
+                indicies.push(v3);
+            }
         }
     }
 }
@@ -198,12 +262,15 @@ enum FaceResult {
 }
 
 fn is_face(
-    grid_values: &Array<Vec<f32>>,
+    grid_values: &SDF,
     coord: (usize, usize, usize),
     offset: (usize, usize, usize),
 ) -> FaceResult {
     let other = (coord.0 + offset.0, coord.1 + offset.1, coord.2 + offset.2);
-    match (grid_values[coord] < 0.0, grid_values[other] < 0.0) {
+    match (
+        grid_values(coord.0, coord.1, coord.2) < 0.0,
+        grid_values(other.0, other.1, other.2) < 0.0,
+    ) {
         (true, false) => FaceResult::FacePositive,
         (false, true) => FaceResult::FaceNegative,
         _ => FaceResult::NoFace,

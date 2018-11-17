@@ -7,15 +7,15 @@ extern crate noise;
 extern crate surface_nets;
 
 use cgmath::{Deg, Matrix4, Point3, Vector3};
-use std::time::Instant;
+use gfx::state::{Rasterizer, RasterMethod};
 use gfx::traits::FactoryExt;
-use gfx::Device;
-use glutin::{GlContext, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
+use gfx::{Device, Primitive};
+use glutin::{Event, WindowEvent};
+use std::time::Instant;
 //use std::error::Error;
 //use std::fs::File;
 //use std::io::Write;
 
-//use noise::NoiseFn;
 
 pub type ColorFormat = gfx::format::Rgba8;
 pub type DepthFormat = gfx::format::DepthStencil;
@@ -88,28 +88,41 @@ static FRAGMENT_SRC: &'static [u8] = b"
 in vec4 v_Pos;
 
 void main() {
-    gl_FragColor = vec4(v_Pos.x / 10.0, v_Pos.y / 10.0, v_Pos.z / 10.0, 1.0);
+    float r = sin(v_Pos.x / 5.0) * 0.25 + 0.5;
+    float g = sin(v_Pos.y / 5.0) * 0.25 + 0.5;
+    float b = sin(v_Pos.z / 5.0) * 0.25 + 0.5;
+    gl_FragColor = vec4(r, g, b, 1.0);
 }
 ";
 
 fn main() {
     let mut events_loop = glutin::EventsLoop::new();
-    let window_config = glutin::WindowBuilder::new()
-        .with_title("Triangle example".to_string())
-        .with_dimensions(1024, 768);
+    let window_config = glutin::WindowBuilder::new().with_title("Triangle example".to_string());
+    //.with_dimensions(1024, 768);
 
     let context = glutin::ContextBuilder::new()
-        .with_gl(glutin::GlRequest::Specific(glutin::Api::OpenGl, (3, 2)))
+        .with_gl(glutin::GlRequest::Specific(glutin::Api::OpenGl, (4, 6)))
         .with_vsync(true);
     let (window, mut device, mut factory, main_color, main_depth) =
         gfx_window_glutin::init::<ColorFormat, DepthFormat>(window_config, context, &events_loop);
     let mut encoder = gfx::Encoder::from(factory.create_command_buffer());
 
-    let pso = factory.create_pipeline_simple(&VERTEX_SRC, &FRAGMENT_SRC, pipe::new())
-        .unwrap();
+    let pso = {
+        let program = factory.link_program(VERTEX_SRC, FRAGMENT_SRC).unwrap();
+        let mut rasterizer = Rasterizer::new_fill().with_cull_back();
+        //rasterizer.method = RasterMethod::Line(1);
+        factory
+            .create_pipeline_from_program(
+                &program,
+                Primitive::TriangleList,
+                rasterizer,
+                pipe::new(),
+            ).unwrap()
+    };
     let (verts, inds) = get_data();
-    let (vertex_buffer, slice) = factory.create_vertex_buffer_with_slice(&verts as &[_], &inds as &[_]);
-    let perspective = cgmath::perspective(Deg(45.0f32), 1.0, 1.0, 100.0);
+    let (vertex_buffer, slice) =
+        factory.create_vertex_buffer_with_slice(&verts as &[_], &inds as &[_]);
+    let mut perspective = cgmath::perspective(Deg(45.0f32), 1.0, 1.0, 1000.0);
     let mut data = pipe::Data {
         locals: factory.create_constant_buffer(1),
         transform: (perspective * default_view(0.0)).into(),
@@ -124,26 +137,24 @@ fn main() {
         events_loop.poll_events(|event| {
             if let Event::WindowEvent { event, .. } = event {
                 match event {
-                    WindowEvent::Closed |
-                    WindowEvent::KeyboardInput {
-                        input: KeyboardInput {
-                            virtual_keycode: Some(VirtualKeyCode::Escape),
-                            ..
-                        },
-                        ..
-                    } => running = false,
-                    WindowEvent::Resized(_, _) => {
-                        //window.resize(size.to_physical(window.get_hidpi_factor()));
-                        //window.resize(width, height);
-                        gfx_window_glutin::update_views(&window, &mut data.out_color, &mut data.out_depth);
-                    },
+                    WindowEvent::CloseRequested => running = false,
+                    WindowEvent::Resized(size) => {
+                        perspective = cgmath::perspective(Deg(45.0f32), (size.width / size.height) as f32, 1.0, 1000.0);
+                        window.resize(size.to_physical(window.get_hidpi_factor()));
+                        gfx_window_glutin::update_views(
+                            &window,
+                            &mut data.out_color,
+                            &mut data.out_depth,
+                        );
+                    }
+                    //x => println!("{:?}", x),
                     _ => (),
                 }
             }
         });
 
         if !running {
-            break
+            break;
         }
 
         // draw a frame
@@ -161,10 +172,9 @@ fn main() {
 }
 
 fn default_view(time: f32) -> Matrix4<f32> {
-    println!("{}", time);
-    let distance = 20.0;
-    let rotation_rate = 0.5;
-    let center = 5.0;
+    let distance = 300.0;
+    let rotation_rate = 0.1;
+    let center = 100.0;
     let x = (time * rotation_rate).cos() * distance + center;
     let y = (time * rotation_rate).sin() * distance + center;
     let z = center + distance / 2.0;
@@ -175,77 +185,39 @@ fn default_view(time: f32) -> Matrix4<f32> {
     )
 }
 
-fn get_data() -> (Vec<Vertex>, Vec<u16>) {
-    let (verts, indicies) = surface_nets::surface_net(10, |(x, y, z)| {
-        // let x = x as f64 / 10.0;
-        // let y = y as f64 / 10.0;
-        // let z = z as f64 / 10.0;
-        // let bias_source = (y - 5.0) / 10.0;
-        // let bias = bias_source;
-        // simplex.get([x,y,z]) as f32 + bias as f32
-        let x = x as f32 - 5.0;
-        let y = y as f32 - 5.0;
-        let z = z as f32 - 5.0;
-        (x * x + y * y + z * z).sqrt() - 5.0
-        //let sum = x + y + z;
-        //match sum & 1 == 0 {
-        //    false => -1.0,
-        //    true => 1.0,
-        //}
-        //x as f32 - 5.5
-    });
+fn get_data() -> (Vec<Vertex>, Vec<u32>) {
+    let simplex = noise::OpenSimplex::new();
+    use noise::NoiseFn;
+    let (verts, indicies) = surface_nets::surface_net(
+        200,
+        &move |x, y, z| {
+            let x = x as f64 / 5.0;
+            let y = y as f64 / 5.0;
+            let z = z as f64 / 5.0;
+            //let bias_source = (y - 5.0) / 10.0;
+            //let bias = bias_source;
+            simplex.get([x,y,z]) as f32 //+ bias as f32
+            //
+            // let x = x as f32 - 5.0;
+            // let y = y as f32 - 5.0;
+            // let z = z as f32 - 5.0;
+            // (x * x + y * y + z * z).sqrt() - 5.0
+            //
+            //let sum = x + y + z;
+            //match sum & 1 == 0 {
+            //    false => -1.0,
+            //    true => 1.0,
+            //}
+            //x as f32 - 5.5
+        },
+        true,
+    );
+    println!("{} verts, {} inds ({} triangles)", verts.len(), indicies.len(), indicies.len() / 3);
     (
         verts
             .into_iter()
             .map(|(x, y, z)| Vertex::new([x, y, z]))
             .collect(),
-        indicies.into_iter().map(|i| i as u16).collect(),
+        indicies.into_iter().map(|i| i as u32).collect(),
     )
 }
-
-//fn main() {
-//    //let simplex = noise::OpenSimplex::new();
-//    let (verts, indicies) = surface_nets::surface_net(100, |(x, y, z)| {
-//        // let x = x as f64 / 10.0;
-//        // let y = y as f64 / 10.0;
-//        // let z = z as f64 / 10.0;
-//        // let bias_source = (y - 5.0) / 10.0;
-//        // let bias = bias_source;
-//        // simplex.get([x,y,z]) as f32 + bias as f32
-//        let x = x as f32 - 5.0;
-//        let y = y as f32 - 5.0;
-//        let z = z as f32 - 5.0;
-//        (x * x + y * y + z * z).sqrt() - 5.0
-//        //let sum = x + y + z;
-//        //match sum & 1 == 0 {
-//        //    false => -1.0,
-//        //    true => 1.0,
-//        //}
-//        //x as f32 - 5.5
-//    });
-//    match write_obj(&verts, &indicies) {
-//        Ok(()) => (),
-//        Err(err) => println!("{}", err),
-//    }
-//}
-//
-//fn write_obj(verts: &[(f32, f32, f32)], indicies: &[usize]) -> Result<(), Box<Error>> {
-//    let mut file = File::create("model.obj")?;
-//    for &(x, y, z) in verts {
-//        writeln!(file, "v {} {} {}", x, y, z)?;
-//    }
-//    let mut indicies = indicies.iter();
-//    loop {
-//        let a = indicies.next();
-//        let b = indicies.next();
-//        let c = indicies.next();
-//        match (a, b, c) {
-//            (Some(a), Some(b), Some(c)) => {
-//                // obj files are 1-indexed
-//                writeln!(file, "f {} {} {}", a + 1, b + 1, c + 1)?;
-//            }
-//            _ => break,
-//        }
-//    }
-//    Ok(())
-//}
